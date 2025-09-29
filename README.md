@@ -1,8 +1,26 @@
-# Craigslist Bot
+# Craigslist Bot - Technical Assessment
 
-A serverless Python bot for scraping Craigslist, filtering with LLM, and sending SMS notifications.
+A serverless Python bot for scraping Craigslist, filtering with LLM, and Discord notifications.
 
-## Setup
+## Project Structure
+
+```
+craigslist-bot/
+├── main.py           # Production serverless entry point and core logic
+├── requirements.txt   # Python dependencies
+├── DECISIONS.md      # Architectural decision documentation
+└── README.md         # This file
+```
+
+## Core Features
+
+- **Native Web Scraping**: Built with `requests` + `BeautifulSoup4`
+- **LLM Filtering**: OpenAI-powered evaluation with dynamic thresholds
+- **State Management**: Google Cloud Firestore for tracking seen listings
+- **Rich Notifications**: Discord webhook alerts with embedded formatting
+- **Production Ready**: Optimized for GCP Cloud Functions deployment
+
+## Quick Start
 
 1. **Install dependencies:**
 
@@ -11,30 +29,41 @@ A serverless Python bot for scraping Craigslist, filtering with LLM, and sending
    ```
 
 2. **Configure environment variables:**
+   Create `.env` file with:
 
    ```bash
-   cp env.example .env
+   OPENAI_API_KEY=your_openai_api_key_here
+   DISCORD_WEBHOOK_URL=your_discord_webhook_url_here
+   SEARCH_QUERY=54cm road bike shimano 105
+   SEARCH_POSTAL=94105
+   SEARCH_DISTANCE=15
+   PRODUCTION_STRICTNESS=very_strict
    ```
 
-   Then edit `.env` and add your actual API keys:
+3. **Run locally (development):**
 
-   - `FIRECRAWL_API_KEY`: Get from [Firecrawl](https://firecrawl.dev)
-   - `OPENAI_API_KEY`: Get from [OpenAI](https://platform.openai.com)
-   - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`: Get from [Twilio](https://twilio.com)
-
-3. **Run the bot:**
    ```bash
    python main.py
    ```
 
+4. **Deploy to GCP Cloud Functions:**
+   Use `craigslist_bot_entry_point(request)` as the entry point function.
+
 ## Architecture
 
-- **Firecrawl API**: Web scraping
-- **Google Cloud Firestore**: State management
-- **OpenAI API**: LLM filtering
-- **Twilio**: SMS notifications
-- **GCP Cloud Functions**: Deployment target
+- **Native Python Scraping**: Direct Craigslist parsing with error handling
+- **Google Cloud Firestore**: Persistent state management for "new listings" tracking
+- **OpenAI API**: Generic LLM appraiser for any classified goods category
+- **Discord Webhooks**: Rich notification system with embedded formatting
+- **Environment Configuration**: Production-ready settings via environment variables
 
-## Current Configuration
+## Configuration
 
-Searching for: "54cm frame road bike with components comparable to Shimano 105's within 15miles of 94105"
+The bot is architecturally flexible and can be configured for any:
+
+- **Item Category**: Bikes, electronics, furniture, vehicles, etc.
+- **Location**: Any ZIP code supported by Craigslist
+- **Match Sensitivity**: Three levels (less_strict/strict/very_strict)
+- **Notification Channel**: Discord webhook URL
+
+See `DECISIONS.md` for detailed architectural decisions and trade-offs.
