@@ -859,8 +859,13 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
             listing_elements = listing_elements[:initial_scrape_count]
             print(f"Limited to {len(listing_elements)} most recent listings for initial scrape")
         else:
+            # For subsequent runs, limit to first 50 listings to prevent timeouts
+            # This prevents processing hundreds/thousands of listings if seen ones aren't found quickly
+            MAX_SUBSEQUENT_LISTINGS = 50
+            if len(listing_elements) > MAX_SUBSEQUENT_LISTINGS:
+                print(f"Limiting subsequent run to first {MAX_SUBSEQUENT_LISTINGS} listings (out of {len(listing_elements)} total)")
+                listing_elements = listing_elements[:MAX_SUBSEQUENT_LISTINGS]
             print(f"Processing listings until first seen one is found (for subsequent run)")
-            # For subsequent runs, we'll stop at the first seen listing to avoid processing thousands of old listings
         
         # Step 2: Extract data from each listing
         for i, listing_element in enumerate(listing_elements):
@@ -905,6 +910,11 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                         # Fallback to hash-based ID if no URL found
                         stable_string = f"{title}_{price}"
                         listing_id = f"json_ld_{abs(hash(stable_string)) % 1000000000}"
+                    
+                    # For subsequent runs, check if we've seen this listing before BEFORE processing it
+                    if not is_initial_run and seen_ids and listing_id in seen_ids:
+                        print(f"Found seen listing at position {i+1}, stopping scraping")
+                        break
                     
                     # Fallback to search URL if no actual listing URL found
                     # Extract region from search URL to use correct region
@@ -991,6 +1001,11 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                     # Use consistent format for DOM elements (numeric_id is already stable)
                     listing_id = f"dom_{numeric_id}"
                 
+                # For subsequent runs, check if we've seen this listing before BEFORE processing it
+                if not is_initial_run and seen_ids and listing_id in seen_ids:
+                    print(f"Found seen listing at position {i+1}, stopping scraping")
+                    break
+                
                 # Step 3: Fetch individual listing page for full description (only for DOM elements)
                 if not isinstance(listing_element, dict):
                     print(f"  Fetching full description from: {listing_url}")
@@ -1064,11 +1079,6 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                 else:
                     # For JSON-LD data, location_zip is already extracted
                     location_zip = location
-                
-                # For subsequent runs, check if we've seen this listing before BEFORE processing it
-                if not is_initial_run and seen_ids and listing_id in seen_ids:
-                    print(f"Found seen listing at position {i+1}, stopping scraping")
-                    break
                 
                 # Create listing dictionary
                 listing_info = {
