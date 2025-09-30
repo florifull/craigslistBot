@@ -71,6 +71,7 @@ def create_user_task(request_data: Dict) -> Dict:
             'enable_initial_scrape': enable_initial_scrape,
             'initial_scrape_count': initial_scrape_count,
             'is_active': True,
+            'search_hash': None,  # Will be set by main.py on first run
             'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(current_time)),
             'last_run': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(current_time)),  # Set initial last_run to now
             'next_cooldown': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(initial_cooldown)),  # Set initial cooldown

@@ -1098,10 +1098,7 @@ def craigslist_bot_entry_point(request=None):
         print("Craigslist Bot - Production Entry Point")
         print("=" * 50)
         
-        # Initialize clients
-        initialize_clients()
-        
-        # Parse user configuration from request
+        # Parse user configuration from request FIRST
         user_config = None
         if request:
             # Try to get JSON data
@@ -1125,6 +1122,36 @@ def craigslist_bot_entry_point(request=None):
                 print(f"No JSON data in request")
                 print(f"Request type: {type(request)}")
                 print(f"Request attributes: {dir(request)}")
+        
+        # CRITICAL: Check if task is paused BEFORE doing anything else
+        task_id = user_config.get('task_id') if user_config else None
+        if task_id:
+            try:
+                from task_api import db
+                task_ref = db.collection('user_tasks').document(task_id)
+                task_doc = task_ref.get()
+                if task_doc.exists:
+                    task_data = task_doc.to_dict()
+                    if not task_data.get('is_active', True):
+                        print(f"⏸️  Task {task_id} is PAUSED - skipping execution")
+                        return {
+                            'statusCode': 200,
+                            'body': {
+                                'message': 'Task is paused - skipping execution',
+                                'total_listings': 0,
+                                'new_listings': 0,
+                                'recommended_listings': 0,
+                                'notification_sent': False,
+                                'sample_listings': []
+                            }
+                        }
+                    else:
+                        print(f"✓ Task {task_id} is ACTIVE - proceeding with execution")
+            except Exception as e:
+                print(f"Warning: Could not check task status: {e}")
+        
+        # Initialize clients AFTER pause check
+        initialize_clients()
         
         # Use user config if provided, otherwise fallback to environment defaults
         if user_config and 'config' in user_config:
@@ -1235,30 +1262,17 @@ def craigslist_bot_entry_point(request=None):
         print(f"Task-specific search hash: {search_hash}")
         print(f"Hash components: query='{refined_query}', user_id='{user_id}', task_id='{task_id}', location='{search_params['location']}', distance='{search_params['distance']}'")
         
-        # Check if task is active before proceeding
+        # CRITICAL: Store search_hash in task document for retrieval later
         if task_id:
             try:
                 from task_api import db
                 task_ref = db.collection('user_tasks').document(task_id)
-                task_doc = task_ref.get()
-                if task_doc.exists:
-                    task_data = task_doc.to_dict()
-                    if not task_data.get('is_active', True):
-                        print(f"Task {task_id} is paused, skipping execution")
-                        return {
-                            'statusCode': 200,
-                            'body': {
-                                'message': 'Task is paused - skipping execution',
-                                'total_listings': 0,
-                                'new_listings': 0,
-                                'recommended_listings': 0,
-                                'notification_sent': False,
-                                'strictness_used': user_strictness,
-                                'sample_listings': []
-                            }
-                        }
+                task_ref.update({'search_hash': search_hash})
+                print(f"✓ Stored search_hash in task document: {search_hash}")
             except Exception as e:
-                print(f"Warning: Could not check task status: {e}")
+                print(f"Warning: Could not store search_hash: {e}")
+        
+        # Pause check already done at the beginning - removed duplicate check
         
         # Retrieve previously seen listing IDs (skip for initial run)
         print(f"\nRetrieving previously seen listings...")
