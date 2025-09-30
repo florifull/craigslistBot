@@ -579,6 +579,54 @@ def create_search_hash(query: str, location: str, distance: str, user_id: str = 
         search_string = f"{query.lower()}_{location}_{distance}"
     return hashlib.md5(search_string.encode()).hexdigest()
 
+def format_time_ago(date_posted: str) -> str:
+    """
+    Format a datePosted string into a human-readable 'time ago' format
+    
+    Args:
+        date_posted: ISO 8601 datetime string (e.g., '2024-09-30T19:22:00-07:00')
+        
+    Returns:
+        Human-readable string like '2 hours ago' or '3 days ago'
+    """
+    if not date_posted:
+        return ''
+    
+    try:
+        from datetime import datetime, timezone
+        
+        # Parse the ISO 8601 datetime
+        posted_time = datetime.fromisoformat(date_posted.replace('Z', '+00:00'))
+        
+        # Get current time in UTC
+        now = datetime.now(timezone.utc)
+        
+        # Calculate time difference
+        diff = now - posted_time
+        
+        # Format based on time difference
+        if diff.days > 0:
+            if diff.days == 1:
+                return '1 day ago'
+            return f'{diff.days} days ago'
+        
+        hours = diff.seconds // 3600
+        if hours > 0:
+            if hours == 1:
+                return '1 hour ago'
+            return f'{hours} hours ago'
+        
+        minutes = diff.seconds // 60
+        if minutes > 0:
+            if minutes == 1:
+                return '1 minute ago'
+            return f'{minutes} minutes ago'
+        
+        return 'Just now'
+    except Exception as e:
+        print(f"Error formatting time ago: {e}")
+        return ''
+
 def send_notification_via_discord(recommended_listings: List[Dict], user_query: str, webhook_url: str = None) -> bool:
     """
     Send notification via Discord webhook
@@ -618,9 +666,13 @@ def send_notification_via_discord(recommended_listings: List[Dict], user_query: 
             # Get reasoning - send full reasoning to Discord
             reasoning = eval_data.get('reasoning', 'No reasoning provided')
             
+            # Format time posted
+            time_ago = format_time_ago(listing.get('date_posted', ''))
+            time_posted_line = f"🕒 **Posted:** {time_ago}\n" if time_ago else ''
+            
             embed["fields"].append({
                 "name": f"{i}. {listing['title'][:50]}...",
-                "value": f"💰 **Price:** {listing['price']}\n⭐ **Match Score:** {score:.0f}%\n🪄 **Reasoning:** {reasoning}\n🔗 **URL:** {listing['url']}",
+                "value": f"{time_posted_line}💰 **Price:** {listing['price']}\n⭐ **Match Score:** {score:.0f}%\n🪄 **Reasoning:** {reasoning}\n🔗 **URL:** {listing['url']}",
                 "inline": False
             })
         
@@ -752,7 +804,8 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                                 'description': product.get('description', ''),
                                 'images': product.get('image', []),
                                 'location': product.get('offers', {}).get('availableAtOrFrom', {}).get('address', {}).get('addressLocality', ''),
-                                'position': item.get('position', 0)
+                                'position': item.get('position', 0),
+                                'datePosted': product.get('datePosted', '')  # Add datePosted field
                             }
                             json_ld_listings.append(listing_data)
             except Exception as e:
@@ -786,9 +839,12 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                     description = listing_element['description']
                     location = listing_element['location']
                     images = listing_element['images']
+                    date_posted = listing_element.get('datePosted', '')  # Extract datePosted
                     
-                    # Generate a consistent listing ID based on position and title hash
-                    listing_id = f"json_ld_{i}_{hash(title) % 100000}"
+                    # Generate a stable listing ID based on title and price (not position!)
+                    # This ensures the same listing always gets the same ID regardless of position
+                    stable_string = f"{title}_{price}"
+                    listing_id = f"json_ld_{abs(hash(stable_string)) % 1000000000}"
                     
                     # For JSON-LD data, we need to find the actual listing URL from the DOM
                     # Look for the corresponding DOM element with the same title
@@ -836,12 +892,12 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                     # Extract title from the link text
                     title = link_element.get_text(strip=True)
                     
-                    # Extract listing ID from URL and use consistent format
+                    # Extract listing ID from URL - this is stable and unique
                     numeric_id = extract_listing_id_from_url(listing_url)
                     if not numeric_id:
                         continue
-                    # Use consistent format for DOM elements
-                    listing_id = f"dom_{i}_{numeric_id}"
+                    # Use consistent format for DOM elements (numeric_id is already stable)
+                    listing_id = f"dom_{numeric_id}"
                 
                 # Step 3: Fetch individual listing page for full description (only for DOM elements)
                 if not isinstance(listing_element, dict):
@@ -909,7 +965,8 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                     'title': title,
                     'text': text_content,
                     'price': price,
-                    'location_zip': location_zip
+                    'location_zip': location_zip,
+                    'date_posted': date_posted if isinstance(listing_element, dict) else ''  # Only for JSON-LD listings
                 }
                 
                 listings.append(listing_info)
