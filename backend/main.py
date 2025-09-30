@@ -1386,8 +1386,21 @@ def craigslist_bot_entry_point(request=None):
                     }
                 }
         
-        # Determine if this is an initial run based on user configuration
-        is_initial_run = enable_initial_scrape and len(seen_ids) == 0
+        # Determine if this is an initial run based on task run count
+        # Get current run count from task document
+        current_run_count = 0
+        if task_id:
+            try:
+                from task_api import db
+                task_ref = db.collection('user_tasks').document(task_id)
+                task_doc = task_ref.get()
+                if task_doc.exists:
+                    current_run_count = task_doc.to_dict().get('total_runs', 0)
+            except Exception as e:
+                print(f"Warning: Could not get current run count: {e}")
+        
+        # Initial run is when run count is 0 AND initial scrape is enabled
+        is_initial_run = enable_initial_scrape and current_run_count == 0
         if is_initial_run:
             print("This is an initial run - will process up to specified number of listings")
         else:
@@ -1536,11 +1549,28 @@ def craigslist_bot_entry_point(request=None):
         
         # Apply strictness filter based on user configuration
         threshold = STRICTNESS_THRESHOLDS[user_strictness]
+        
+        # Debug: Show all scores before filtering
+        print(f"\nDebug - All listing scores:")
+        for i, listing in enumerate(evaluated_listings):
+            score = listing['evaluation']['match_score']
+            title = listing['title'][:50]
+            print(f"  {i+1}. Score: {score:.2f} - {title}...")
+        
         recommended_listings = get_production_listings(evaluated_listings, threshold)
         
         print(f"\nFilter Results:")
         print(f"  Threshold: {threshold:.2f}")
+        print(f"  Total evaluated: {len(evaluated_listings)}")
         print(f"  Recommended listings: {len(recommended_listings)}")
+        
+        # Debug: Show which ones passed
+        if recommended_listings:
+            print(f"  Passed listings:")
+            for i, listing in enumerate(recommended_listings):
+                score = listing['evaluation']['match_score']
+                title = listing['title'][:50]
+                print(f"    {i+1}. Score: {score:.2f} - {title}...")
         
         # Send Discord notification for new recommendations
         notification_sent = False
