@@ -372,7 +372,7 @@ def llm_evaluate_listing(listing: Dict, user_criteria: str) -> Dict:
 LISTING TO EVALUATE:
 Title: {listing['title']}
 Price: {listing['price']}
-Description: {listing['text'][:1000]}...
+Description: {listing['text'][:2000]}...
 
 USER'S REQUIREMENTS:
 {user_criteria}
@@ -505,6 +505,40 @@ def get_seen_listing_ids(search_hash: str) -> List[str]:
     except Exception as e:
         print(f"⚠ Error retrieving seen listings: {e}")
         return []
+
+def get_last_scrape_time(search_hash: str) -> str:
+    """
+    Get the timestamp of the last scrape for a specific search
+    
+    Args:
+        search_hash: Unique identifier for the search query/location
+        
+    Returns:
+        ISO timestamp string of last scrape, or None if no previous scrape
+    """
+    if not firestore_client:
+        print("⚠ Firestore client not available - requiring proper GCP authentication")
+        return None
+    
+    try:
+        doc_ref = firestore_client.collection('seen_listings').document(search_hash)
+        doc = doc_ref.get()
+        
+        if doc.exists:
+            data = doc.to_dict()
+            last_updated = data.get('last_updated')
+            if last_updated:
+                # Convert Firestore timestamp to ISO string
+                if hasattr(last_updated, 'isoformat'):
+                    return last_updated.isoformat()
+                else:
+                    return str(last_updated)
+        
+        return None
+        
+    except Exception as e:
+        print(f"⚠ Error retrieving last scrape time: {e}")
+        return None
 
 def save_listing_ids(search_hash: str, listing_ids: List[str]) -> bool:
     """
@@ -752,7 +786,7 @@ def extract_listing_id_from_url(url: str) -> Optional[str]:
         print(f"Error extracting ID from URL {url}: {e}")
         return None
 
-def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initial_scrape_count: int = 6, seen_ids: set = None) -> List[Dict[str, str]]:
+def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initial_scrape_count: int = 6, seen_ids: set = None, last_scrape_time: str = None) -> List[Dict[str, str]]:
     """
     Scrape Craigslist search results and individual listings using native Python
     
@@ -761,6 +795,7 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
         is_initial_run: Whether this is the initial run (limits to initial_scrape_count listings)
         initial_scrape_count: Number of listings to scrape on initial run
         seen_ids: Set of previously seen listing IDs (for subsequent runs)
+        last_scrape_time: ISO timestamp of last scrape (for subsequent runs to only get newer listings)
         
     Returns:
         List of dictionaries with keys: id, url, title, text
@@ -825,6 +860,7 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
             print(f"Limited to {len(listing_elements)} most recent listings for initial scrape")
         else:
             print(f"Processing listings until first seen one is found (for subsequent run)")
+            # For subsequent runs, we'll stop at the first seen listing to avoid processing thousands of old listings
         
         # Step 2: Extract data from each listing
         for i, listing_element in enumerate(listing_elements):
@@ -834,17 +870,12 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                 # Check if this is JSON-LD data (dict) or DOM element
                 if isinstance(listing_element, dict):
                     # Handle JSON-LD data
-                    title = listing_element['title']
-                    price = listing_element['price']
-                    description = listing_element['description']
-                    location = listing_element['location']
-                    images = listing_element['images']
+                    title = listing_element.get('title', 'No title available')
+                    price = listing_element.get('price', '')
+                    description = listing_element.get('description', '')
+                    location = listing_element.get('location', '')
+                    images = listing_element.get('images', [])
                     date_posted = listing_element.get('datePosted', '')  # Extract datePosted
-                    
-                    # Generate a stable listing ID based on title and price (not position!)
-                    # This ensures the same listing always gets the same ID regardless of position
-                    stable_string = f"{title}_{price}"
-                    listing_id = f"json_ld_{abs(hash(stable_string)) % 1000000000}"
                     
                     # For JSON-LD data, we need to find the actual listing URL from the DOM
                     # Look for the corresponding DOM element with the same title
@@ -861,6 +892,20 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                                     actual_listing_url = base_url + actual_listing_url
                                 break
                     
+                    # Use the same ID generation as DOM elements for consistency
+                    if actual_listing_url:
+                        numeric_id = extract_listing_id_from_url(actual_listing_url)
+                        if numeric_id:
+                            listing_id = f"dom_{numeric_id}"  # Use same format as DOM elements
+                        else:
+                            # Fallback to hash-based ID if URL extraction fails
+                            stable_string = f"{title}_{price}"
+                            listing_id = f"json_ld_{abs(hash(stable_string)) % 1000000000}"
+                    else:
+                        # Fallback to hash-based ID if no URL found
+                        stable_string = f"{title}_{price}"
+                        listing_id = f"json_ld_{abs(hash(stable_string)) % 1000000000}"
+                    
                     # Fallback to search URL if no actual listing URL found
                     # Extract region from search URL to use correct region
                     from urllib.parse import urlparse
@@ -868,8 +913,53 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                     region = parsed_url.netloc.split('.')[0]  # Extract 'miami' from 'miami.craigslist.org'
                     listing_url = actual_listing_url or f"https://{region}.craigslist.org/search/sss?query={title.replace(' ', '+')}"
                     
-                    # Use the description from JSON-LD as text content
+                    # For JSON-LD listings, also fetch the full description from the individual page
+                    # Use the description from JSON-LD as initial text content
                     text_content = description if description else title
+                    
+                    # Fetch full description from individual listing page for JSON-LD listings too
+                    if actual_listing_url:
+                        try:
+                            print(f"  Fetching full description from: {actual_listing_url}")
+                            listing_response = requests.get(actual_listing_url, headers=headers, timeout=10)
+                            listing_response.raise_for_status()
+                            
+                            listing_soup = BeautifulSoup(listing_response.content, 'html.parser')
+                            
+                            # Extract full description text
+                            description_element = listing_soup.find('section', {'id': 'postingbody'})
+                            if description_element:
+                                # Remove the "QR Code Link to This Post" element
+                                qr_element = description_element.find('div', class_='print-information')
+                                if qr_element:
+                                    qr_element.decompose()
+                                
+                                full_text_content = description_element.get_text(strip=True)
+                                if full_text_content:
+                                    text_content = full_text_content  # Use full description if available
+                                
+                                # Also extract structured attributes for JSON-LD listings
+                                attributes = {}
+                                attr_elements = listing_soup.find_all('p', class_='attrgroup')
+                                for attr_group in attr_elements:
+                                    spans = attr_group.find_all('span')
+                                    for i in range(0, len(spans), 2):
+                                        if i + 1 < len(spans):
+                                            key = spans[i].get_text(strip=True).rstrip(':')
+                                            value = spans[i + 1].get_text(strip=True)
+                                            # Only add non-empty key-value pairs
+                                            if key and value and key != '' and value != '':
+                                                attributes[key] = value
+                                
+                                # Format attributes for LLM
+                                if attributes:
+                                    attributes_text = "\n\nStructured Attributes:\n"
+                                    for key, value in attributes.items():
+                                        attributes_text += f"- {key}: {value}\n"
+                                    text_content += attributes_text
+                        except Exception as e:
+                            print(f"  Warning: Could not fetch full description for JSON-LD listing: {e}")
+                            # Keep the original text_content from JSON-LD
                     
                     print(f"  JSON-LD listing: {title} - ${price}")
                     
@@ -891,6 +981,8 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                     
                     # Extract title from the link text
                     title = link_element.get_text(strip=True)
+                    if not title:
+                        title = "No title available"
                     
                     # Extract listing ID from URL - this is stable and unique
                     numeric_id = extract_listing_id_from_url(listing_url)
@@ -949,11 +1041,31 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                             zip_match = re.search(r'\b\d{5}\b', location_text)
                             if zip_match:
                                 location_zip = zip_match.group()
+                    
+                    # Extract structured attributes (bicycle type, frame size, etc.)
+                    attributes = {}
+                    attr_elements = listing_soup.find_all('p', class_='attrgroup')
+                    for attr_group in attr_elements:
+                        spans = attr_group.find_all('span')
+                        for i in range(0, len(spans), 2):
+                            if i + 1 < len(spans):
+                                key = spans[i].get_text(strip=True).rstrip(':')
+                                value = spans[i + 1].get_text(strip=True)
+                                # Only add non-empty key-value pairs
+                                if key and value and key != '' and value != '':
+                                    attributes[key] = value
+                    
+                    # Format attributes for LLM
+                    attributes_text = ""
+                    if attributes:
+                        attributes_text = "\n\nStructured Attributes:\n"
+                        for key, value in attributes.items():
+                            attributes_text += f"- {key}: {value}\n"
                 else:
                     # For JSON-LD data, location_zip is already extracted
                     location_zip = location
                 
-                # For subsequent runs, check if we've seen this listing before
+                # For subsequent runs, check if we've seen this listing before BEFORE processing it
                 if not is_initial_run and seen_ids and listing_id in seen_ids:
                     print(f"Found seen listing at position {i+1}, stopping scraping")
                     break
@@ -963,7 +1075,7 @@ def scrape_new_listings_data(search_url: str, is_initial_run: bool = True, initi
                     'id': listing_id,
                     'url': listing_url,
                     'title': title,
-                    'text': text_content,
+                    'text': text_content + (attributes_text if 'attributes_text' in locals() else ''),
                     'price': price,
                     'location_zip': location_zip,
                     'date_posted': date_posted if isinstance(listing_element, dict) else ''  # Only for JSON-LD listings
@@ -1025,7 +1137,7 @@ def main():
     print(f"\nScraping listings with enhanced data extraction...")
     
     try:
-        listings = scrape_new_listings_data(search_url, True, 6, None)
+        listings = scrape_new_listings_data(search_url, True, 6, None, None)
         
         print(f"\nScraping completed. Found {len(listings)} listings")
         
@@ -1128,13 +1240,13 @@ def main():
         print(f"Very Strict (≥{threshold_very:.2f}): {len(matches_very)} matches")
         print("="*80)
         
-        # Save all processed listing IDs to Firestore for future reference
-        print(f"\nSaving processed listing IDs to state management...")
-        all_listing_ids = [listing['id'] for listing in listings]  # All IDs, not just new ones
-        save_success = save_listing_ids(search_hash, all_listing_ids)
+        # Save only NEW listing IDs to Firestore for future reference
+        print(f"\nSaving NEW listing IDs to state management...")
+        new_listing_ids = [listing['id'] for listing in new_listings]  # Only new IDs
+        save_success = save_listing_ids(search_hash, new_listing_ids)
         
         if save_success:
-            print(f"✓ State management updated: {len(all_listing_ids)} listing IDs saved")
+            print(f"✓ State management updated: {len(new_listing_ids)} NEW listing IDs saved")
         else:
             print(f"⚠ State management update failed")
             
@@ -1331,12 +1443,14 @@ def craigslist_bot_entry_point(request=None):
         
         # Pause check already done at the beginning - removed duplicate check
         
-        # Retrieve previously seen listing IDs (skip for initial run)
+        # Retrieve previously seen listing IDs and last scrape time (skip for initial run)
         print(f"\nRetrieving previously seen listings...")
         print(f"Looking for search hash: {search_hash}")
         seen_ids = get_seen_listing_ids(search_hash)
         seen_ids = set(seen_ids)  # Convert to set for efficient lookup
+        last_scrape_time = get_last_scrape_time(search_hash)
         print(f"Retrieved {len(seen_ids)} previously seen IDs: {list(seen_ids)[:3]}..." if len(seen_ids) > 3 else f"Retrieved {len(seen_ids)} previously seen IDs: {list(seen_ids)}")
+        print(f"Last scrape time: {last_scrape_time}")
         
         # Handle seeding mode (when initial scrape is disabled)
         if seed_seen_set:
@@ -1408,7 +1522,7 @@ def craigslist_bot_entry_point(request=None):
         
         # Scrape listings with enhanced data extraction
         print(f"\nScraping listings...")
-        listings = scrape_new_listings_data(search_url, is_initial_run, initial_scrape_count, seen_ids)
+        listings = scrape_new_listings_data(search_url, is_initial_run, initial_scrape_count, seen_ids, last_scrape_time)
         
         if len(listings) == 0:
             # This could be either no listings found OR no new listings found
@@ -1468,15 +1582,20 @@ def craigslist_bot_entry_point(request=None):
             print(f"  Total scraped: {len(listings)} (limited to {initial_scrape_count} most recent)")
             print(f"  NEW listings: {len(new_listings)} (all listings are new for initial run)")
         else:
-            # For subsequent runs, listings are already filtered during scraping
-            new_listings = listings
-            print(f"\nSubsequent Run - Already filtered during scraping:")
-            print(f"  NEW listings: {len(new_listings)}")
+            # For subsequent runs, filter out listings that are already seen
+            new_listings = []
+            for listing in listings:
+                if listing['id'] not in seen_ids:
+                    new_listings.append(listing)
+            print(f"\nSubsequent Run - Filtering for new listings:")
+            print(f"  Total scraped: {len(listings)}")
             print(f"  Previously seen: {len(seen_ids)}")
+            print(f"  NEW listings: {len(new_listings)}")
         
         if len(new_listings) == 0:
-            # Save current state and return
-            save_listing_ids(search_hash, [listing['id'] for listing in listings])
+            # No new listings found - don't save anything to seen list
+            # The seen list should only contain listings we've actually processed
+            print("No new listings found - not updating seen list")
             
             # Update task statistics for no new listings found
             if task_id:
@@ -1623,9 +1742,13 @@ def craigslist_bot_entry_point(request=None):
             from task_api import update_task_stats
             update_task_stats(task_id, len(listings), len(recommended_listings), log_entry)
         
-        # Save processed listing IDs to state management (only if we have listings)
-        if listings:
-            save_listing_ids(search_hash, [listing['id'] for listing in listings])
+        # Save ONLY NEW listing IDs to state management (only if we have new listings)
+        if new_listings:
+            new_listing_ids = [listing['id'] for listing in new_listings]
+            save_listing_ids(search_hash, new_listing_ids)
+            print(f"✓ Saved {len(new_listing_ids)} NEW listing IDs to seen list")
+        else:
+            print("No new listings to save to seen list")
         
         # Prepare response
         response_body = {
